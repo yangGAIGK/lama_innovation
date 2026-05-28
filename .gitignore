@@ -135,3 +135,12 @@ dmypy.json
 .vscode/
 ## vim
 *.sw?
+
+# LaMa outputs, models, and data
+outputs/
+.hydra/
+big-lama/
+*.zip
+!requirements.txt
+LaMa_test_images/
+tmp/

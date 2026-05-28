@@ -9,6 +9,8 @@
 import logging
 import os
 import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import traceback
 
 from saicinpainting.evaluation.utils import move_to_device
@@ -34,6 +36,9 @@ from saicinpainting.utils import register_debug_signal_handlers
 
 LOGGER = logging.getLogger(__name__)
 
+# Hydra changes cwd at runtime, so capture the original working directory first
+ORIGINAL_CWD = os.getcwd()
+
 
 @hydra.main(config_path='../configs/prediction', config_name='default.yaml')
 def main(predict_config: OmegaConf):
@@ -41,7 +46,15 @@ def main(predict_config: OmegaConf):
         if sys.platform != 'win32':
             register_debug_signal_handlers()  # kill -10 <pid> will result in traceback dumped into log
 
-        device = torch.device("cpu")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        LOGGER.info(f"Using device: {device}")
+
+        # Resolve relative paths against the original working directory
+        for key in ['model.path', 'indir', 'outdir']:
+            val = OmegaConf.select(predict_config, key)
+            if val is not None and not os.path.isabs(val):
+                resolved = os.path.join(ORIGINAL_CWD, val)
+                OmegaConf.update(predict_config, key, resolved)
 
         train_config_path = os.path.join(predict_config.model.path, 'config.yaml')
         with open(train_config_path, 'r') as f:
@@ -60,16 +73,22 @@ def main(predict_config: OmegaConf):
         if not predict_config.get('refine', False):
             model.to(device)
 
-        if not predict_config.indir.endswith('/'):
-            predict_config.indir += '/'
+        if not predict_config.indir.endswith(('/', '\\')):
+            predict_config.indir += os.sep
 
         dataset = make_default_val_dataset(predict_config.indir, **predict_config.dataset)
+        LOGGER.info(f"Dataset size: {len(dataset)}, indir: {predict_config.indir}")
         for img_i in tqdm.trange(len(dataset)):
             mask_fname = dataset.mask_filenames[img_i]
+            # Normalize both paths to use same separator for correct slicing
+            indir_norm = os.path.normpath(predict_config.indir) + os.sep
+            mask_norm = os.path.normpath(mask_fname)
+            rel_path = mask_norm[len(indir_norm):] if mask_norm.startswith(indir_norm) else os.path.basename(mask_fname)
             cur_out_fname = os.path.join(
                 predict_config.outdir, 
-                os.path.splitext(mask_fname[len(predict_config.indir):])[0] + out_ext
+                os.path.splitext(rel_path)[0] + out_ext
             )
+            LOGGER.info(f"Processing {img_i}: {mask_fname} -> {cur_out_fname}")
             os.makedirs(os.path.dirname(cur_out_fname), exist_ok=True)
             batch = default_collate([dataset[img_i]])
             if predict_config.get('refine', False):
@@ -91,7 +110,13 @@ def main(predict_config: OmegaConf):
 
             cur_res = np.clip(cur_res * 255, 0, 255).astype('uint8')
             cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
-            cv2.imwrite(cur_out_fname, cur_res)
+            # cv2.imwrite can't handle non-ASCII paths on Windows, use imencode instead
+            ext = os.path.splitext(cur_out_fname)[1]
+            is_success, buf = cv2.imencode(ext, cur_res)
+            if is_success:
+                buf.tofile(cur_out_fname)
+            else:
+                LOGGER.warning(f"Failed to encode image: {cur_out_fname}")
 
     except KeyboardInterrupt:
         LOGGER.warning('Interrupted by user')
