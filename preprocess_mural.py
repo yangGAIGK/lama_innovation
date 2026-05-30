@@ -128,14 +128,9 @@ def preprocess_mural(image_path, top_hat_thresh=80, inpaint_radius=12,
     lab = cv2.cvtColor(inpainted, cv2.COLOR_BGR2LAB)
     L, A, B_ch = cv2.split(lab)
 
-    # 1. 导向滤波淡化裂纹
-    L_norm = L.astype(np.float32) / 255.0
-    L_filtered_norm = guided_filter(L_norm, L_norm, guided_r, guided_eps)
-    L_filtered = np.clip(L_filtered_norm * 255.0, 0, 255).astype(np.uint8)
-    
-    # 2. 局部对比度增强 (CLAHE)
+    # 1. 局部对比度增强 (CLAHE) —— 直接从 L 通道出发
     clahe = cv2.createCLAHE(clipLimit=1.2, tileGridSize=(16, 16))
-    L_enhanced = clahe.apply(L_filtered)
+    L_enhanced = clahe.apply(L)
 
     # ------------------ 【新增：噪声防火墙】 ------------------
     # 使用双边滤波平滑细微颗粒，但保留结构线条
